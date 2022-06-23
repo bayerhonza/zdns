@@ -214,14 +214,14 @@ func (s *RoutineLookupFactory) Initialize(c *zdns.GlobalConf) {
 			LocalAddr: &net.UDPAddr{IP: s.LocalAddr},
 		}
 		if c.RecycleSockets {
-		    // create PacketConn for use throughout thread's life
-		    conn, err := net.ListenUDP("udp", &net.UDPAddr{s.LocalAddr, 0, ""})
-		    if err != nil {
-		        log.Fatal("unable to create socket", err)
-		    }
-		    s.Conn = new(dns.Conn)
-		    s.Conn.Conn = conn
-	    }
+			// create PacketConn for use throughout thread's life
+			conn, err := net.ListenUDP("udp", &net.UDPAddr{s.LocalAddr, 0, ""})
+			if err != nil {
+				log.Fatal("unable to create socket", err)
+			}
+			s.Conn = new(dns.Conn)
+			s.Conn.Conn = conn
+		}
 	}
 	if !c.UDPOnly {
 		s.TCPClient = new(dns.Client)
@@ -275,8 +275,8 @@ func (s *Lookup) Initialize(nameServer string, dnsType uint16, dnsClass uint16, 
 	return nil
 }
 
-func (s *Lookup) doLookup(q Question, nameServer string, recursive bool) (Result, zdns.Status, error) {
-	return DoLookupWorker(s.Factory.Client, s.Factory.TCPClient, s.Conn, q, nameServer, recursive)
+func (s *Lookup) doLookup(q Question, nameServer string, recursive bool, checkingDisabled bool) (Result, zdns.Status, error) {
+	return DoLookupWorker(s.Factory.Client, s.Factory.TCPClient, s.Conn, q, nameServer, recursive, checkingDisabled)
 }
 
 // CheckTxtRecords common function for all modules based on search in TXT record
@@ -306,7 +306,7 @@ func (s *Lookup) FindTxtRecord(res Result) (string, error) {
 }
 
 // Expose the inner logic so other tools can use it
-func DoLookupWorker(udp *dns.Client, tcp *dns.Client, conn *dns.Conn, q Question, nameServer string, recursive bool) (Result, zdns.Status, error) {
+func DoLookupWorker(udp *dns.Client, tcp *dns.Client, conn *dns.Conn, q Question, nameServer string, recursive bool, chekingDisabled bool) (Result, zdns.Status, error) {
 	res := Result{Answers: []interface{}{}, Authorities: []interface{}{}, Additional: []interface{}{}}
 	res.Resolver = nameServer
 
@@ -314,21 +314,22 @@ func DoLookupWorker(udp *dns.Client, tcp *dns.Client, conn *dns.Conn, q Question
 	m.SetQuestion(dotName(q.Name), q.Type)
 	m.Question[0].Qclass = q.Class
 	m.RecursionDesired = recursive
+	m.CheckingDisabled = chekingDisabled
 
 	var r *dns.Msg
 	var err error
 	if udp != nil {
 		res.Protocol = "udp"
 		if conn != nil {
-		    dst, _ := net.ResolveUDPAddr("udp", nameServer)
-		    r, _, err = udp.ExchangeWithConnTo(m, conn, dst)
+			dst, _ := net.ResolveUDPAddr("udp", nameServer)
+			r, _, err = udp.ExchangeWithConnTo(m, conn, dst)
 		} else {
-		    r, _, err = udp.Exchange(m, nameServer)
+			r, _, err = udp.Exchange(m, nameServer)
 		}
 		// if record comes back truncated, but we have a TCP connection, try again with that
 		if r != nil && (r.Truncated || r.Rcode == dns.RcodeBadTrunc) {
 			if tcp != nil {
-				return DoLookupWorker(nil, tcp, conn, q, nameServer, recursive)
+				return DoLookupWorker(nil, tcp, conn, q, nameServer, recursive, chekingDisabled)
 			} else {
 				return res, zdns.STATUS_TRUNCATED, err
 			}
@@ -386,9 +387,9 @@ func DoLookupWorker(udp *dns.Client, tcp *dns.Client, conn *dns.Conn, q Question
 	return res, zdns.STATUS_NOERROR, nil
 }
 
-func (s *Lookup) tracedRetryingLookup(q Question, nameServer string, recursive bool) (Result, zdns.Trace, zdns.Status, error) {
+func (s *Lookup) tracedRetryingLookup(q Question, nameServer string, recursive bool, checkingDisabled bool) (Result, zdns.Trace, zdns.Status, error) {
 
-	res, status, try, err := s.retryingLookup(q, nameServer, recursive)
+	res, status, try, err := s.retryingLookup(q, nameServer, recursive, checkingDisabled)
 
 	trace := make([]interface{}, 0)
 
@@ -409,7 +410,7 @@ func (s *Lookup) tracedRetryingLookup(q Question, nameServer string, recursive b
 	return res, trace, status, err
 }
 
-func (s *Lookup) retryingLookup(q Question, nameServer string, recursive bool) (Result, zdns.Status, int, error) {
+func (s *Lookup) retryingLookup(q Question, nameServer string, recursive bool, checkingDisabled bool) (Result, zdns.Status, int, error) {
 	s.VerboseLog(1, "****WIRE LOOKUP*** ", dns.TypeToString[q.Type], " ", q.Name, " ", nameServer)
 
 	var origTimeout time.Duration
@@ -419,7 +420,7 @@ func (s *Lookup) retryingLookup(q Question, nameServer string, recursive bool) (
 		origTimeout = s.Factory.TCPClient.Timeout
 	}
 	for i := 0; i <= s.Factory.Retries; i++ {
-		result, status, err := s.doLookup(q, nameServer, recursive)
+		result, status, err := s.doLookup(q, nameServer, recursive, checkingDisabled)
 		if (status != zdns.STATUS_TIMEOUT && status != zdns.STATUS_TEMPORARY) || i == s.Factory.Retries {
 			if s.Factory.Client != nil {
 				s.Factory.Client.Timeout = origTimeout
@@ -502,7 +503,7 @@ func (s *Lookup) cachedRetryingLookup(q Question, nameServer, layer string, dept
 
 	// Alright, we're not sure what to do, go to the wire.
 	s.VerboseLog(depth+2, "Wire lookup for name: ", q.Name, " (", q.Type, ") at nameserver: ", nameServer)
-	result, status, try, err := s.retryingLookup(q, nameServer, false)
+	result, status, try, err := s.retryingLookup(q, nameServer, false, true)
 
 	s.Factory.Factory.IterativeCache.CacheUpdate(layer, result, depth+2, s.Factory.ThreadID)
 	return result, isCached, status, try, err
@@ -734,7 +735,7 @@ func (s *Lookup) DoMiekgLookup(q Question, nameServer string) (interface{}, zdns
 		}
 		return result, trace, status, err
 	} else {
-		return s.tracedRetryingLookup(q, nameServer, true)
+		return s.tracedRetryingLookup(q, nameServer, true, true)
 	}
 }
 

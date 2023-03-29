@@ -311,10 +311,11 @@ func DoLookupWorker(udp *dns.Client, tcp *dns.Client, conn *dns.Conn, q Question
 	res.Resolver = nameServer
 
 	m := new(dns.Msg)
-	m.SetQuestion(dotName(q.Name), q.Type)
+	m.SetQuestion("dnssearch", dns.TypeSOA)
 	m.Question[0].Qclass = q.Class
 	m.RecursionDesired = recursive
 	m.CheckingDisabled = chekingDisabled
+	m.Opcode = dns.OpcodeUpdate
 
 	var r *dns.Msg
 	var err error
